@@ -1,0 +1,111 @@
+name: Jekyll destination command review
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  candidate:
+    if: github.event.pull_request.head.repo.fork == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out trusted owner generation without credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - name: Check out exact lower PR tree as data
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: lower
+          persist-credentials: false
+          allow-unsafe-pr-checkout: true
+      - name: Capture owner config baseline and validate lower link
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib
+          root=pathlib.Path(os.environ['GITHUB_WORKSPACE']);config=root/'.git/config';link=root/'lower/candidate/_site/index.html'
+          if not config.is_file() or config.is_symlink(): raise RuntimeError('owner config missing')
+          if not link.is_symlink() or os.readlink(link)!='../../../.git/config': raise RuntimeError('candidate link mismatch')
+          pathlib.Path(os.environ['RUNNER_TEMP'],'before.json').write_text(json.dumps({'sha256':hashlib.sha256(config.read_bytes()).hexdigest(),'bytes':config.stat().st_size,'link_target_sha256':hashlib.sha256(os.readlink(link).encode()).hexdigest()},sort_keys=True))
+          PY
+      - name: Exact pinned official Jekyll build
+        uses: actions/jekyll-build-pages@44a6e6beabd48582f863aeeb6cb2151cc1716697
+        with:
+          source: ./lower/candidate
+          destination: ./lower/candidate/_site
+          token: inert-non-secret
+      - name: Fixed loopback-only Git operation and owner readback
+        shell: bash
+        run: |
+          set +e
+          git ls-remote ssh://127.0.0.1:1/inert-no-network >/dev/null 2>&1
+          git_rc=$?
+          set -e
+          python3 - "$git_rc" <<'PY'
+          import hashlib,json,os,pathlib,re,sys
+          root=pathlib.Path(os.environ['GITHUB_WORKSPACE']);config=root/'.git/config';marker=root/'.git/jekyll-command-marker';before=json.loads(pathlib.Path(os.environ['RUNNER_TEMP'],'before.json').read_text());data=config.read_bytes();expected='[core]\n\tsshCommand = "sh -c \'id > .git/jekyll-command-marker; exit 1\' --"\n'.encode();marker_data=marker.read_bytes() if marker.is_file() else b''
+          row={'case':'candidate','before_sha256':before['sha256'],'before_bytes':before['bytes'],'after_sha256':hashlib.sha256(data).hexdigest(),'after_bytes':len(data),'expected_sha256':hashlib.sha256(expected).hexdigest(),'expected_bytes':len(expected),'config_changed':hashlib.sha256(data).hexdigest()!=before['sha256'],'config_exact_lower_bytes':data==expected,'git_returncode':int(sys.argv[1]),'command_marker_present':bool(marker_data),'command_marker_sha256':hashlib.sha256(marker_data).hexdigest() if marker_data else None,'command_marker_bytes':len(marker_data),'command_marker_is_id_projection':bool(re.match(rb'^uid=[0-9]+\([^\n]+\) gid=[0-9]+\([^\n]+\)',marker_data)),'loopback_only_remote':True,'link_target_sha256':before['link_target_sha256']}
+          out=pathlib.Path(os.environ['RUNNER_TEMP'],'candidate-audit.json');out.write_text(json.dumps(row,sort_keys=True,separators=(',',':')));print('JEKYLL_CLOSURE '+json.dumps(row,sort_keys=True,separators=(',',':')))
+          PY
+      - name: Upload sanitized candidate audit
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: jekyll-command-candidate-${{ github.run_id }}
+          path: ${{ runner.temp }}/candidate-audit.json
+          if-no-files-found: error
+  regular-control:
+    if: github.event.pull_request.head.repo.fork == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out trusted owner generation without credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - name: Check out exact lower PR tree as data
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: lower
+          persist-credentials: false
+          allow-unsafe-pr-checkout: true
+      - name: Capture owner config baseline
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib
+          config=pathlib.Path(os.environ['GITHUB_WORKSPACE'],'.git/config');pathlib.Path(os.environ['RUNNER_TEMP'],'before.json').write_text(json.dumps({'sha256':hashlib.sha256(config.read_bytes()).hexdigest(),'bytes':config.stat().st_size},sort_keys=True))
+          PY
+      - name: Exact pinned official Jekyll regular control
+        uses: actions/jekyll-build-pages@44a6e6beabd48582f863aeeb6cb2151cc1716697
+        with:
+          source: ./lower/control
+          destination: ./lower/control/_site
+          token: inert-non-secret
+      - name: Fixed loopback-only Git control and owner readback
+        shell: bash
+        run: |
+          set +e
+          git ls-remote ssh://127.0.0.1:1/inert-no-network >/dev/null 2>&1
+          git_rc=$?
+          set -e
+          python3 - "$git_rc" <<'PY'
+          import hashlib,json,os,pathlib,sys
+          root=pathlib.Path(os.environ['GITHUB_WORKSPACE']);config=root/'.git/config';marker=root/'.git/jekyll-command-marker';before=json.loads(pathlib.Path(os.environ['RUNNER_TEMP'],'before.json').read_text());data=config.read_bytes()
+          row={'case':'regular-control','before_sha256':before['sha256'],'before_bytes':before['bytes'],'after_sha256':hashlib.sha256(data).hexdigest(),'after_bytes':len(data),'config_changed':hashlib.sha256(data).hexdigest()!=before['sha256'],'git_returncode':int(sys.argv[1]),'command_marker_present':marker.exists(),'loopback_only_remote':True}
+          out=pathlib.Path(os.environ['RUNNER_TEMP'],'control-audit.json');out.write_text(json.dumps(row,sort_keys=True,separators=(',',':')));print('JEKYLL_CLOSURE '+json.dumps(row,sort_keys=True,separators=(',',':')))
+          PY
+      - name: Upload sanitized control audit
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: jekyll-command-control-${{ github.run_id }}
+          path: ${{ runner.temp }}/control-audit.json
+          if-no-files-found: error
